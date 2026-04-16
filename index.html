@@ -475,7 +475,7 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
     <button class="modal-close-x" id="closeImportModal">✕</button>
     <div class="modal-head">
       <h2>✦ Course Import</h2>
-      <p>Paste or upload your course write-up — powered by Dr. Michael Adelani Adewusi AI-Lab live backend.</p>
+      <p>Paste or upload your course write-up — powered by Groq AI via live backend.</p>
     </div>
     <div class="modal-body">
       <div class="import-tabs">
@@ -546,13 +546,13 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
       <div class="model-selector-row">
         <div class="model-selector-top">
           <span class="model-selector-label">🤖 Model</span>
-          <span class="api-key-badge" style="font-size:10px;padding:3px 9px;background:var(--teal-xlight);color:var(--teal-dark);border-radius:999px;font-weight:700">⚡ Free · Fast</span>
+          <span class="api-key-badge" style="font-size:10px;padding:3px 9px;background:var(--teal-xlight);color:var(--teal-dark);border-radius:999px;font-weight:700">⚡ Groq · Free · Fast</span>
         </div>
         <select class="model-select" id="groqModelSelect">
-          <option value="llama-3.3-70b-versatile">Best quality</option>
-          <option value="llama-3.1-8b-instant">Fastest</option>
-          <option value="llama3-70b-8192">Option 1</option>
-          <option value="llama3-8b-8192">Option 2</option>
+          <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile — best quality</option>
+          <option value="llama-3.1-8b-instant">llama-3.1-8b-instant — fastest</option>
+          <option value="llama3-70b-8192">llama3-70b-8192 — Llama 3 70B</option>
+          <option value="llama3-8b-8192">llama3-8b-8192 — Llama 3 8B</option>
         </select>
         <div class="model-status" id="groqModelStatus"></div>
       </div>
@@ -1482,21 +1482,68 @@ async function directGroqRequest(promptText, stepLabel){
   throw new Error(stepLabel+': '+msg);
 }
 
+// ── Wake up Render backend (free tier spins down after inactivity) ──
+async function wakeUpBackend(renderUrl){
+  const url = renderUrl.replace(/\/+$/,'') + '/ping';
+  const MAX_WAIT = 90;   // seconds to wait for cold start
+  const INTERVAL = 5;    // seconds between pings
+
+  for(let elapsed=0; elapsed<MAX_WAIT; elapsed+=INTERVAL){
+    try{
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if(res.ok){ const d=await res.json(); if(d.status==='ok') return true; }
+    }catch(e){ /* still waking */ }
+    // Show countdown
+    const el = document.getElementById('aiStatusText');
+    const remaining = MAX_WAIT - elapsed - INTERVAL;
+    if(el) el.innerHTML = `⏱ Waking up backend server… <strong>(${remaining > 0 ? remaining+'s' : 'almost ready'})</strong>`;
+    await sleep(INTERVAL * 1000);
+  }
+  throw new Error('Backend did not respond after '+MAX_WAIT+'s. Check your Render service is running.');
+}
+
 // ── Render backend call: browser → your Render service ──
 async function renderBackendRequest(promptText, stepLabel){
   const { renderUrl } = getCfg();
   if(!renderUrl) throw new Error('No Render URL configured. Use the Setup panel.');
+  const base = renderUrl.replace(/\/+$/,'');
   const model = getGroqModel();
-  const res = await fetch(renderUrl.replace(/\/+$/,'')+'/api/generate-step', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: promptText, model, stepLabel })
-  });
-  if(res.ok) return await res.json();
-  const err = await res.json().catch(()=>({}));
-  const msg = err?.error || 'Server error '+res.status;
-  if(res.status===429) throw new Error('Rate limit — try llama-3.1-8b-instant or wait 60s.');
-  throw new Error(stepLabel+': '+msg);
+
+  const MAX_RETRIES = 3;
+  for(let attempt=1; attempt<=MAX_RETRIES; attempt++){
+    try{
+      const res = await fetch(base+'/api/generate-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: promptText, model, stepLabel }),
+        signal: AbortSignal.timeout(120000)  // 2 min timeout per step
+      });
+      if(res.ok) return await res.json();
+      const err = await res.json().catch(()=>({}));
+      const msg = err?.error || 'Server error '+res.status;
+      if(res.status===429) throw new Error('Rate limit — try llama-3.1-8b-instant or wait 60s.');
+      throw new Error(stepLabel+': '+msg);
+    }catch(e){
+      const isNetwork = e.name==='TypeError' || e.name==='AbortError' || e.message.includes('fetch');
+      if(isNetwork && attempt < MAX_RETRIES){
+        const el=document.getElementById('aiStatusText');
+        if(el) el.textContent = stepLabel+' — retrying (attempt '+attempt+'/'+MAX_RETRIES+')...';
+        await sleep(3000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+// ── Helpers ──
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function showCountdown(seconds, prefixMsg){
+  for(let s=seconds; s>0; s--){
+    const el=document.getElementById('aiStatusText');
+    if(el) el.innerHTML=prefixMsg+' <strong>Retrying in '+s+'s…</strong>';
+    await sleep(1000);
+  }
 }
 
 // ── Dispatcher ──
@@ -1798,11 +1845,20 @@ async function runAIGeneration(){
   const statusTxt=document.getElementById('aiStatusText');
   btn.disabled=true;
   statusEl.className='ai-status loading';
-  statusEl.innerHTML=`<div class="spinner"></div><div id="aiStatusText">Starting — 9 focused API calls, one per design step...</div>`;
+  statusEl.innerHTML=`<div class="spinner"></div><div id="aiStatusText">Checking backend connection...</div>`;
   genList.style.display='block';
   for(let i=1;i<=7;i++) setGenStep(i,false);
 
   try{
+    // Wake up Render backend if using it (free tier spins down after 15 min)
+    const cfg = getCfg();
+    if(cfg.mode === 'render' && cfg.renderUrl){
+      const el=document.getElementById('aiStatusText');
+      if(el) el.textContent = 'Waking up backend server (free tier cold start)...';
+      await wakeUpBackend(cfg.renderUrl);
+      if(el) el.textContent = '✓ Backend ready — starting 9 design steps...';
+      await sleep(500);
+    }
     const parsed = await callGemini(combinedInput);
 
     const newData=defaultData();
