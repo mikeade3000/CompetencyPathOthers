@@ -1484,22 +1484,24 @@ async function directGroqRequest(promptText, stepLabel){
 
 // ── Wake up Render backend (free tier spins down after inactivity) ──
 async function wakeUpBackend(renderUrl){
-  const url = renderUrl.replace(/\/+$/,'') + '/ping';
-  const MAX_WAIT = 90;   // seconds to wait for cold start
-  const INTERVAL = 5;    // seconds between pings
+  const url  = renderUrl.replace(/\/+$/,'') + '/';  // use root — always deployed
+  const MAX_WAIT = 120;  // Render free tier can take up to 2 minutes cold start
+  const INTERVAL = 6;
 
   for(let elapsed=0; elapsed<MAX_WAIT; elapsed+=INTERVAL){
     try{
-      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      if(res.ok){ const d=await res.json(); if(d.status==='ok') return true; }
-    }catch(e){ /* still waking */ }
-    // Show countdown
-    const el = document.getElementById('aiStatusText');
+      // ANY HTTP response (even 404) means the server is awake
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if(res.status < 500) return true;   // 2xx, 3xx, 4xx = server is up
+    }catch(e){ /* still starting */ }
+
     const remaining = MAX_WAIT - elapsed - INTERVAL;
-    if(el) el.innerHTML = `⏱ Waking up backend server… <strong>(${remaining > 0 ? remaining+'s' : 'almost ready'})</strong>`;
+    const el = document.getElementById('aiStatusText');
+    if(el) el.innerHTML = `⏱ Waking up backend… <strong>${remaining > 0 ? remaining+'s remaining' : 'almost ready…'}</strong>`;
     await sleep(INTERVAL * 1000);
   }
-  throw new Error('Backend did not respond after '+MAX_WAIT+'s. Check your Render service is running.');
+  // Last-ditch: try the actual API endpoint directly
+  throw new Error('Backend cold start exceeded 2 minutes. Please visit https://competencypath-others.onrender.com in a new tab to wake it manually, then try again.');
 }
 
 // ── Render backend call: browser → your Render service ──
@@ -1516,7 +1518,7 @@ async function renderBackendRequest(promptText, stepLabel){
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: promptText, model, stepLabel }),
-        signal: AbortSignal.timeout(120000)  // 2 min timeout per step
+        signal: AbortSignal.timeout(150000)  // 2.5 min per step
       });
       if(res.ok) return await res.json();
       const err = await res.json().catch(()=>({}));
