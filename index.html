@@ -475,7 +475,7 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
     <button class="modal-close-x" id="closeImportModal">✕</button>
     <div class="modal-head">
       <h2>✦ Course Import</h2>
-      <p>Paste or upload your course write-up — AI generates a full competency-based design in seconds.</p>
+      <p>Paste or upload your course write-up — powered by Groq AI via live backend.</p>
     </div>
     <div class="modal-body">
       <div class="import-tabs">
@@ -507,6 +507,39 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
           <div class="hint-box"><strong>📝 Assessment details</strong><br>Existing tests, projects, marking criteria</div>
           <div class="hint-box"><strong>🎯 Existing objectives</strong><br>Even rough ones — the AI will refine them to SMART CBE format</div>
         </div>
+      </div>
+
+      <!-- ── SETUP BANNER (shown when not configured) ── -->
+      <div class="setup-banner" id="setupBanner">
+        <h3>⚙️ Quick Setup</h3>
+        <p>Choose how you want to power the AI generation — takes 30 seconds.</p>
+        <div class="setup-tabs">
+          <button class="setup-tab active" data-setup="direct">🔑 Direct Groq Key</button>
+          <button class="setup-tab" data-setup="render">🚀 Render Backend</button>
+        </div>
+
+        <!-- Direct Groq key panel (default — works immediately) -->
+        <div class="setup-panel active" id="setupPanel-direct">
+          <input class="setup-input" type="password" id="setupGroqKey" placeholder="Paste Groq API key (gsk_…)"/>
+          <div class="setup-hint">
+            Free key at <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a>
+            — 14,400 req/day, no credit card. Key stays in your browser only.
+          </div>
+          <button class="btn-setup-save" id="btnSaveGroqKey">✓ Save &amp; Start Using</button>
+        </div>
+
+        <!-- Render backend panel -->
+        <div class="setup-panel" id="setupPanel-render">
+          <input class="setup-input" type="text" id="setupRenderUrl" placeholder="https://your-app.onrender.com" value="https://competencypath-others.onrender.com"/>
+          <div class="setup-hint">
+            Deploy <code style="background:rgba(255,255,255,.1);padding:1px 5px;border-radius:4px">server.js</code>
+            to <a href="https://render.com" target="_blank">render.com</a> with your GROQ_API_KEY env var,
+            then paste the service URL above.
+          </div>
+          <button class="btn-setup-save" id="btnSaveRenderUrl">✓ Save &amp; Connect</button>
+        </div>
+
+        <div class="setup-status" id="setupStatus"></div>
       </div>
 
       <!-- ── GROQ MODEL SELECTOR ── -->
@@ -1392,41 +1425,85 @@ function buildCombinedInput(){
 }
 
 // ─────────────────────────────────────────────────────────────────
-// RENDER BACKEND  — all Groq API calls go through this proxy
-// Set RENDER_URL to your deployed Render service URL
+// CONFIG — loaded from localStorage, set via setup banner
+// Mode A: direct Groq key (browser → Groq API directly)
+// Mode B: Render backend URL (browser → your Render service → Groq)
 // ─────────────────────────────────────────────────────────────────
-const RENDER_URL = 'https://competencypath-api.onrender.com'; // ← replace with your Render URL
+const GROQ_DIRECT_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+const PLACEHOLDER_RENDER    = 'https://competencypath-others.onrender.com';
+
+function getCfg(){
+  return {
+    mode:      localStorage.getItem('cp_mode')       || 'render',
+    groqKey:   localStorage.getItem('cp_groq_direct') || '',
+    renderUrl: localStorage.getItem('cp_render_url')  || 'https://competencypath-others.onrender.com'
+  };
+}
+
+function isConfigured(){
+  const c = getCfg();
+  // Always configured if using the baked-in Render URL
+  if(c.mode === 'render' && c.renderUrl) return true;
+  return (c.mode === 'direct' && c.groqKey);
+}
 
 function getGroqModel(){
   return document.getElementById('groqModelSelect')?.value || 'llama-3.3-70b-versatile';
 }
 
-async function renderRequest(promptText, stepLabel){
+// ── Direct call: browser → Groq (uses stored key) ──
+async function directGroqRequest(promptText, stepLabel){
+  const { groqKey } = getCfg();
+  if(!groqKey) throw new Error('No Groq API key. Use the Setup panel to add your key.');
   const model = getGroqModel();
-  const res = await fetch(`${RENDER_URL}/api/generate-step`, {
+  const complexSteps = ['Step 4','Step 5','Step 7','Step 8'];
+  const maxTok = complexSteps.some(s => stepLabel.includes(s)) ? 4096 : 2048;
+
+  const res = await fetch(GROQ_DIRECT_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + groqKey },
+    body: JSON.stringify({
+      model, messages:[{role:'user',content:promptText}],
+      response_format:{type:'json_object'}, temperature:0.7, max_tokens:maxTok
+    })
+  });
+
+  if(res.ok){
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content || '';
+    const cleaned = raw.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+    try{ return JSON.parse(cleaned); }
+    catch(e){ throw new Error('Could not parse response for '+stepLabel+'. Try a shorter write-up.'); }
+  }
+  const err = await res.json().catch(()=>({}));
+  const msg = err?.error?.message || 'HTTP '+res.status;
+  if(res.status===401) throw new Error('Invalid Groq API key. Update it in the Setup panel.');
+  if(res.status===429) throw new Error('Rate limit on '+model+'. Switch to llama-3.1-8b-instant or wait 60s.');
+  throw new Error(stepLabel+': '+msg);
+}
+
+// ── Render backend call: browser → your Render service ──
+async function renderBackendRequest(promptText, stepLabel){
+  const { renderUrl } = getCfg();
+  if(!renderUrl) throw new Error('No Render URL configured. Use the Setup panel.');
+  const model = getGroqModel();
+  const res = await fetch(renderUrl.replace(/\/+$/,'')+'/api/generate-step', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: promptText, model, stepLabel })
   });
-
   if(res.ok) return await res.json();
-
-  // Handle errors
-  let errMsg = `Server error ${res.status}`;
-  try{
-    const e = await res.json();
-    errMsg = e.error || errMsg;
-  }catch{}
-
-  if(res.status === 429 || res.status === 503){
-    throw new Error(`Rate limit on ${model} — try a faster model (llama-3.1-8b-instant) or wait 60s.`);
-  }
-  throw new Error(`${stepLabel}: ${errMsg}`);
+  const err = await res.json().catch(()=>({}));
+  const msg = err?.error || 'Server error '+res.status;
+  if(res.status===429) throw new Error('Rate limit — try llama-3.1-8b-instant or wait 60s.');
+  throw new Error(stepLabel+': '+msg);
 }
 
-// Alias — the orchestrator calls providerRequest
+// ── Dispatcher ──
 async function providerRequest(promptText, stepLabel){
-  return renderRequest(promptText, stepLabel);
+  const { mode } = getCfg();
+  if(mode === 'render') return renderBackendRequest(promptText, stepLabel);
+  return directGroqRequest(promptText, stepLabel);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1782,16 +1859,10 @@ document.getElementById('menuBtn').addEventListener('click',()=>{
 });
 document.getElementById('openImportBtn').addEventListener('click',()=>{
   populateTargetSelect();
-  // API keys are handled server-side on Render
+  refreshSetupBanner();
   document.getElementById('importModal').classList.add('open');
 });
 document.getElementById('closeImportModal').addEventListener('click',()=>{ document.getElementById('importModal').classList.remove('open'); });
-
-// Model selector wiring
-document.getElementById('modelSelect').addEventListener('change',function(){
-  const customInput = document.getElementById('customModelInput');
-  if(customInput) customInput.style.display = this.value==='custom'?'block':'none';
-});
 
 
 document.getElementById('importModal').addEventListener('click',e=>{ if(e.target===document.getElementById('importModal')) document.getElementById('importModal').classList.remove('open'); });
@@ -1799,6 +1870,77 @@ document.getElementById('closeCompleteModal').addEventListener('click',()=>{ doc
 document.getElementById('completeModal').addEventListener('click',e=>{ if(e.target===document.getElementById('completeModal')) document.getElementById('completeModal').classList.remove('open'); });
 
 // Provider is Groq via Render — no client-side keys needed
+
+// ── SETUP BANNER LOGIC ──────────────────────────────────────────
+function refreshSetupBanner(){
+  const banner = document.getElementById('setupBanner');
+  if(!banner) return;
+  // Hide banner if already configured
+  banner.style.display = isConfigured() ? 'none' : 'block';
+  // Pre-fill saved values
+  const c = getCfg();
+  const gEl = document.getElementById('setupGroqKey');
+  const rEl = document.getElementById('setupRenderUrl');
+  if(gEl && c.groqKey) gEl.placeholder = 'Key saved ✓ — paste new one to update';
+  if(rEl && c.renderUrl && c.renderUrl !== PLACEHOLDER_RENDER) rEl.value = c.renderUrl;
+  // Activate correct tab
+  setSetupTab(c.mode === 'render' ? 'render' : 'direct');
+}
+
+function setSetupTab(mode){
+  document.querySelectorAll('.setup-tab').forEach(t => t.classList.toggle('active', t.dataset.setup === mode));
+  document.querySelectorAll('.setup-panel').forEach(p => p.classList.toggle('active', p.id === 'setupPanel-'+mode));
+}
+
+function showSetupStatus(msg, ok){
+  const el = document.getElementById('setupStatus');
+  if(!el) return;
+  el.textContent = msg;
+  el.className = 'setup-status ' + (ok ? 'ok' : 'err');
+  if(ok) setTimeout(()=>{ el.className='setup-status'; refreshSetupBanner(); }, 2000);
+}
+
+// Tab switching
+document.querySelectorAll('.setup-tab').forEach(tab =>
+  tab.addEventListener('click', () => setSetupTab(tab.dataset.setup))
+);
+
+// Save Groq key
+document.getElementById('btnSaveGroqKey').addEventListener('click', function(){
+  const val = document.getElementById('setupGroqKey').value.trim();
+  if(!val){ showSetupStatus('Please paste your Groq key first.', false); return; }
+  if(!val.startsWith('gsk_')){ showSetupStatus('That doesn\'t look like a Groq key (should start with gsk_).', false); return; }
+  localStorage.setItem('cp_groq_direct', val);
+  localStorage.setItem('cp_mode', 'direct');
+  showSetupStatus('✅ Groq key saved! You can generate now.', true);
+});
+
+// Save Render URL
+document.getElementById('btnSaveRenderUrl').addEventListener('click', async function(){
+  const val = document.getElementById('setupRenderUrl').value.trim().replace(/\/+$/,'');
+  if(!val || !val.startsWith('http')){ showSetupStatus('Please paste your full Render URL (https://…).', false); return; }
+  this.textContent = 'Testing connection…'; this.disabled = true;
+  try{
+    const r = await fetch(val+'/');
+    const d = await r.json().catch(()=>({}));
+    if(d.status === 'ok'){
+      localStorage.setItem('cp_render_url', val);
+      localStorage.setItem('cp_mode', 'render');
+      showSetupStatus('✅ Connected to Render backend!', true);
+    } else {
+      showSetupStatus('Server responded but returned unexpected data. Check your Render URL.', false);
+    }
+  }catch(e){
+    // CORS or network — save anyway and let actual generation test it
+    localStorage.setItem('cp_render_url', val);
+    localStorage.setItem('cp_mode', 'render');
+    showSetupStatus('✅ URL saved. (Connection test blocked by CORS — will verify on first generation.)', true);
+  }finally{
+    this.textContent = '✓ Save & Connect'; this.disabled = false;
+  }
+});
+
+
 
 document.querySelectorAll('.import-tab').forEach(tab=>{
   tab.addEventListener('click',()=>{
