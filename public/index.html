@@ -475,7 +475,7 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
     <button class="modal-close-x" id="closeImportModal">✕</button>
     <div class="modal-head">
       <h2>✦ Course Import</h2>
-      <p>Paste or upload your course write-up — powered by Dr. Michael Adelani Adewusi AI-Lab</p>
+      <p>Paste or upload your course write-up — powered by Groq AI.</p>
     </div>
     <div class="modal-body">
       <div class="import-tabs">
@@ -523,13 +523,13 @@ main::-webkit-scrollbar-thumb{background:#c7dde4;border-radius:8px}
       <div class="model-selector-row">
         <div class="model-selector-top">
           <span class="model-selector-label">🤖 Model</span>
-          <span class="api-key-badge" style="font-size:10px;padding:3px 9px;background:var(--teal-xlight);color:var(--teal-dark);border-radius:999px;font-weight:700">⚡ Free · Fast</span>
+          <span class="api-key-badge" style="font-size:10px;padding:3px 9px;background:var(--teal-xlight);color:var(--teal-dark);border-radius:999px;font-weight:700">⚡ Groq · Free · Fast</span>
         </div>
         <select class="model-select" id="groqModelSelect">
-          <option value="llama-3.3-70b-versatile">Best quality</option>
-          <option value="llama-3.1-8b-instant">Fastest</option>
-          <option value="llama3-70b-8192">Super Option - A</option>
-          <option value="llama3-8b-8192">Super Option - B</option>
+          <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile — best quality</option>
+          <option value="llama-3.1-8b-instant">llama-3.1-8b-instant — fastest</option>
+          <option value="llama3-70b-8192">llama3-70b-8192 — Llama 3 70B</option>
+          <option value="llama3-8b-8192">llama3-8b-8192 — Llama 3 8B</option>
         </select>
         <div class="model-status" id="groqModelStatus"></div>
       </div>
@@ -1171,7 +1171,7 @@ function renderContent(){
       <div style="flex:1">
         <div class="step-num-label">Step ${step.id} of ${STEPS.length}</div>
         <div class="step-title">${step.title}</div>
-        ${unit.aiGenerated?'<div class="ai-filled-badge">✦ Adelani AI Lab - Enhanced</div>':''}
+        ${unit.aiGenerated?'<div class="ai-filled-badge">✦ AI-Enhanced</div>':''}
         <div class="step-progress-row">
           <div class="step-progress-bar"><div class="step-progress-fill" id="stepProgFill" style="width:${pct}%"></div></div>
           <span class="step-pct-label" id="stepProgTxt">${pct}% complete</span>
@@ -1359,7 +1359,7 @@ function generateUnitHtml(unit){
     <div class="ts-card"><div class="num" style="color:#0e2433">${grand.toFixed(1)}h</div><div class="lbl">Total notional hours</div></div>
   </div>`:''}
   ${sections}
-  <div class="footer">Exported from CompetencyPath v2.0 · Powered by Dr. Michael Adelani Adewusi AI Research Lab · Kampala International University, Uganda</div>
+  <div class="footer">Exported from CompetencyPath v2.0 · Powered by Google Gemini · Dr. Michael Adelani Adewusi · Kampala International University, Uganda</div>
 </div>
 </body>
 </html>`;
@@ -1463,7 +1463,7 @@ async function renderBackendRequest(promptText, stepLabel){
   const base  = (cfg.renderUrl || '');  // '' = relative = same origin
   const model = getGroqModel();
 
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 4;
   for(let attempt=1; attempt<=MAX_ATTEMPTS; attempt++){
     // Live elapsed timer shown in the status bar
     let secs = 0;
@@ -1481,7 +1481,7 @@ async function renderBackendRequest(promptText, stepLabel){
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ prompt: promptText, model, stepLabel }),
-        signal:  AbortSignal.timeout(100000)   // 100s — covers full cold-start
+        signal:  AbortSignal.timeout(300000)   // 5 min — server handles retries internally
       });
       clearInterval(ticker);
 
@@ -1497,22 +1497,27 @@ async function renderBackendRequest(promptText, stepLabel){
 
     }catch(e){
       clearInterval(ticker);
-      const retriable = e.name==='AbortError' || e.name==='TypeError' ||
-                        e.message.includes('fetch') || e.message.includes('network');
-      if(retriable && attempt < MAX_ATTEMPTS){
+      const isTimeout = e.name==='AbortError' || e.message.includes('timed out') || e.message.includes('signal');
+      const isNetwork = e.name==='TypeError' || e.message.includes('fetch') || e.message.includes('network');
+
+      if(isTimeout && attempt < MAX_ATTEMPTS){
+        // Server is handling Groq rate-limit retries — just wait and try again
         const retryEl = document.getElementById('aiStatusText');
-        if(retryEl) retryEl.textContent =
-          stepLabel + ' — network error, retrying (' + attempt + '/' + MAX_ATTEMPTS + ')…';
-        await sleep(4000);
+        if(retryEl) retryEl.textContent = stepLabel + ' — server busy with retries, waiting 30s…';
+        await sleep(30000);
         continue;
       }
-      // All retries exhausted or non-retriable error
-      if(retriable){
-        throw new Error(
-          'Cannot reach backend after ' + MAX_ATTEMPTS + ' attempts. ' +
-          'Please open https://competencypath-others.onrender.com in a new tab, ' +
-          'wait for {"status":"ok"} to appear, then click Generate again.'
-        );
+      if(isNetwork && attempt < MAX_ATTEMPTS){
+        const retryEl = document.getElementById('aiStatusText');
+        if(retryEl) retryEl.textContent = stepLabel + ' — reconnecting (' + attempt + '/' + MAX_ATTEMPTS + ')…';
+        await sleep(5000);
+        continue;
+      }
+      if(isTimeout){
+        throw new Error('Server is rate-limited across all models. Please wait 2 minutes and try again, or switch to a faster model.');
+      }
+      if(isNetwork){
+        throw new Error('Cannot reach the backend. Check your internet connection and try again.');
       }
       throw e;
     }
