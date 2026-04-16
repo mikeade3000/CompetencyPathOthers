@@ -1482,87 +1482,75 @@ async function directGroqRequest(promptText, stepLabel){
   throw new Error(stepLabel+': '+msg);
 }
 
-// ── Wake up Render backend (free tier spins down after inactivity) ──
-async function wakeUpBackend(renderUrl){
-  const url = renderUrl.replace(/\/+$/,'') + '/';
-  const el  = () => document.getElementById('aiStatusText');
-
-  // Render queues cold-start requests and serves them once the service wakes.
-  // We use mode:'no-cors' so CORS doesn't block us — any resolved fetch = server alive.
-  // Timeout is 90 s (single long wait) to match Render's cold-start window.
-  if(el()) el().innerHTML = '⏱ Waking backend (Render free tier cold-start — please wait up to 90s)…';
-
-  // Countdown display while waiting
-  let secs = 0;
-  const ticker = setInterval(()=>{
-    secs++;
-    if(el()) el().innerHTML = '⏱ Waking backend… <strong>' + secs + 's</strong> (may take up to 90s on first daily use)';
-  }, 1000);
-
-  try{
-    // First try: normal fetch — works when CORS headers are present
-    const res = await fetch(url, { signal: AbortSignal.timeout(90000) });
-    clearInterval(ticker);
-    if(res.status < 500) return true;
-  }catch(corsErr){
-    // CORS blocked (cold-start page has no CORS headers) — try no-cors
-    try{
-      await fetch(url, { mode:'no-cors', signal: AbortSignal.timeout(90000) });
-      clearInterval(ticker);
-      return true; // opaque response = server responded = it's alive
-    }catch(e){
-      clearInterval(ticker);
-      throw new Error(
-        'Backend unreachable after 90s. Open https://competencypath-others.onrender.com ' +
-        'in a new tab, wait for it to show {"status":"ok"}, then come back and try again.'
-      );
-    }
-  }
-  clearInterval(ticker);
-  return true;
+// ── Helpers ──
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function showCountdown(s,msg){
+  const el=document.getElementById('aiStatusText');
+  for(;s>0;s--){ if(el) el.innerHTML=msg+' <strong>'+s+'s</strong>'; await sleep(1000); }
 }
 
-// ── Render backend call: browser → your Render service ──
+// ── Render backend request — handles cold-start internally ──
+// Render queues requests during cold-start and serves them once awake (30–90s).
+// We send one request with a 100s timeout and show a live timer while waiting.
 async function renderBackendRequest(promptText, stepLabel){
-  const { renderUrl } = getCfg();
-  if(!renderUrl) throw new Error('No Render URL configured. Use the Setup panel.');
-  const base = renderUrl.replace(/\/+$/,'');
+  const cfg = getCfg();
+  if(!cfg.renderUrl) throw new Error('No Render URL configured.');
+  const base  = cfg.renderUrl.replace(/\/+$/,'');
   const model = getGroqModel();
 
-  const MAX_RETRIES = 3;
-  for(let attempt=1; attempt<=MAX_RETRIES; attempt++){
+  const MAX_ATTEMPTS = 3;
+  for(let attempt=1; attempt<=MAX_ATTEMPTS; attempt++){
+    // Live elapsed timer shown in the status bar
+    let secs = 0;
+    const el = () => document.getElementById('aiStatusText');
+    const ticker = setInterval(()=>{
+      secs++;
+      if(el()) el().innerHTML =
+        (secs < 15 ? '' : '⏱ Cold-starting backend… ') +
+        '<strong>' + stepLabel + '</strong>' +
+        (secs > 5 ? ' (' + secs + 's)' : '');
+    }, 1000);
+
     try{
-      const res = await fetch(base+'/api/generate-step', {
-        method: 'POST',
+      const res = await fetch(base + '/api/generate-step', {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: promptText, model, stepLabel }),
-        signal: AbortSignal.timeout(150000)  // 2.5 min per step
+        body:    JSON.stringify({ prompt: promptText, model, stepLabel }),
+        signal:  AbortSignal.timeout(100000)   // 100s — covers full cold-start
       });
-      if(res.ok) return await res.json();
+      clearInterval(ticker);
+
+      if(res.ok){
+        const data = await res.json();
+        if(data && typeof data === 'object') return data;
+        throw new Error('Empty response from server for ' + stepLabel);
+      }
       const err = await res.json().catch(()=>({}));
-      const msg = err?.error || 'Server error '+res.status;
-      if(res.status===429) throw new Error('Rate limit — try llama-3.1-8b-instant or wait 60s.');
-      throw new Error(stepLabel+': '+msg);
+      const msg = err?.error || 'Server error ' + res.status;
+      if(res.status === 429) throw new Error('Rate limit — switch to llama-3.1-8b-instant or wait 60s.');
+      throw new Error(stepLabel + ': ' + msg);
+
     }catch(e){
-      const isNetwork = e.name==='TypeError' || e.name==='AbortError' || e.message.includes('fetch');
-      if(isNetwork && attempt < MAX_RETRIES){
-        const el=document.getElementById('aiStatusText');
-        if(el) el.textContent = stepLabel+' — retrying (attempt '+attempt+'/'+MAX_RETRIES+')...';
-        await sleep(3000);
+      clearInterval(ticker);
+      const retriable = e.name==='AbortError' || e.name==='TypeError' ||
+                        e.message.includes('fetch') || e.message.includes('network');
+      if(retriable && attempt < MAX_ATTEMPTS){
+        const retryEl = document.getElementById('aiStatusText');
+        if(retryEl) retryEl.textContent =
+          stepLabel + ' — network error, retrying (' + attempt + '/' + MAX_ATTEMPTS + ')…';
+        await sleep(4000);
         continue;
+      }
+      // All retries exhausted or non-retriable error
+      if(retriable){
+        throw new Error(
+          'Cannot reach backend after ' + MAX_ATTEMPTS + ' attempts. ' +
+          'Please open https://competencypath-others.onrender.com in a new tab, ' +
+          'wait for {"status":"ok"} to appear, then click Generate again.'
+        );
       }
       throw e;
     }
-  }
-}
-
-// ── Helpers ──
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-async function showCountdown(seconds, prefixMsg){
-  for(let s=seconds; s>0; s--){
-    const el=document.getElementById('aiStatusText');
-    if(el) el.innerHTML=prefixMsg+' <strong>Retrying in '+s+'s…</strong>';
-    await sleep(1000);
   }
 }
 
@@ -1870,15 +1858,6 @@ async function runAIGeneration(){
   for(let i=1;i<=7;i++) setGenStep(i,false);
 
   try{
-    // Wake up Render backend if using it (free tier spins down after 15 min)
-    const cfg = getCfg();
-    if(cfg.mode === 'render' && cfg.renderUrl){
-      const el=document.getElementById('aiStatusText');
-      if(el) el.textContent = 'Waking up backend server (free tier cold start)...';
-      await wakeUpBackend(cfg.renderUrl);
-      if(el) el.textContent = '✓ Backend ready — starting 9 design steps...';
-      await sleep(500);
-    }
     const parsed = await callGemini(combinedInput);
 
     const newData=defaultData();
