@@ -1459,8 +1459,8 @@ async function showCountdown(s,msg){
 // We send one request with a 100s timeout and show a live timer while waiting.
 async function renderBackendRequest(promptText, stepLabel){
   const cfg = getCfg();
-  if(!cfg.renderUrl) throw new Error('No Render URL configured.');
-  const base  = '';  // same origin — no CORS
+  // API_BASE is '' (relative URL) — always valid when served from Render
+  const base  = (cfg.renderUrl || '');  // '' = relative = same origin
   const model = getGroqModel();
 
   const MAX_ATTEMPTS = 3;
